@@ -24,7 +24,8 @@ class PipelineSimulator {
         uint64_t curr_cycle;
         int retire_count;
         int fetching_idx;           // index of next instruction to be fetch from trace data
-        bool branch_stall;          // whether new fetch is stall by previous branch instruction
+        bool branch_stall;          // whether new fetch is stalled by a branch in the pipeline
+        bool branch_finished_ex;    // branch finished EX this cycle; release stall next cycle
         // number of available slot for each stage, maximum 2
         int IF_slots;
         int ID_slots;

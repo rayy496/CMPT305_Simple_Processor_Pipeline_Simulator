@@ -16,6 +16,7 @@ PipelineSimulator::PipelineSimulator(const char* fp,
     retire_count = 0;
     fetching_idx = 0;
     branch_stall = false;
+    branch_finished_ex = false;
 
     IF_slots = 2;
     ID_slots = 2;
@@ -130,12 +131,16 @@ int PipelineSimulator::GivePriorInst(int* stage_arr) const {
 bool PipelineSimulator::FreeFromDepend(int idx) const {
     for(int dependence_idx : trace_data.TraceDataAtIdx(idx).DependencesIdx) {
         const instruction& dependence = trace_data.TraceDataAtIdx(dependence_idx);
-        if(dependence.InstructionType == InstType::Int || dependence.InstructionType == InstType::FP) {
-            // if instruction stay in MEM or later stage, that means it done EX
+        // Int, FP, and Branch: dependence satisfied after EX stage completes
+        if(dependence.InstructionType == InstType::Int ||
+           dependence.InstructionType == InstType::FP  ||
+           dependence.InstructionType == InstType::Branch) {
+            // stage must be past EX (i.e. MEM, WB, or retired)
             if(static_cast<int>(dependence.CurrentStage) <= static_cast<int>(StageType::EX)) {
                 return false;
             }
         }
+        // Load and Store: dependence satisfied after MEM stage completes
         else if(dependence.InstructionType == InstType::Load || dependence.InstructionType == InstType::Store) {
             if(static_cast<int>(dependence.CurrentStage) <= static_cast<int>(StageType::MEM)) {
                 return false;
@@ -151,12 +156,12 @@ bool PipelineSimulator::FreeFromDepend(int idx) const {
 // so that there should be only 1 branch without being execute in the pipeline.
 void PipelineSimulator::FetchNewInst() {
     assert(IF_slots <= 2);
-    // if all instruction fetched, waiting for remaining
-    // instruction to retire, return right away
-    if(fetching_idx >= trace_data.size()) {
-        return;
-    }
-    for(int i = 0; !branch_stall && i < IF_slots; ++i) {
+    // Iterate over both slots explicitly; IF_slots tracks available count
+    // but must not be used as the loop bound since it changes inside the loop.
+    for(int i = 0; !branch_stall && i < 2; ++i) {
+        if(IF_slots == 0) return;
+        // if all instructions fetched, wait for remaining to retire
+        if(fetching_idx >= trace_data.size()) return;
         if(IF[i] != -1) {
             continue;
         }
@@ -167,7 +172,6 @@ void PipelineSimulator::FetchNewInst() {
         }
         trace_data.SetCurrentStage(fetching_idx, StageType::IF);
         fetching_idx++;
-        assert(IF_slots > 0);
         IF_slots--;
     }
 }
@@ -287,7 +291,10 @@ void PipelineSimulator::ProcessEX() {
         // proceed if all dependences satisfied
         MoveToStage(MEM, EX[idx]);
         if(trace_data.GetInstType(EX[idx]) == InstType::Branch) {
-            branch_stall = false;
+            // Per spec: fetch resumes in the cycle AFTER the branch finishes EX.
+            // Set the deferred flag; RunSimulation releases branch_stall at the
+            // start of the next iteration (before any stage is processed).
+            branch_finished_ex = true;
         }
         trace_data.SetCurrentStage(EX[idx], StageType::MEM);
         EX[idx] = -1;
@@ -345,7 +352,7 @@ void PipelineSimulator::ProcessWB() {
             exit(EXIT_FAILURE);
         }
         UpdateRetire(trace_data.GetInstType(WB[idx]));
-        trace_data.SetCurrentStage(idx, StageType::retired);
+        trace_data.SetCurrentStage(WB[idx], StageType::retired);
         WB[idx] = -1;
 
         WB_slots++;
@@ -354,6 +361,13 @@ void PipelineSimulator::ProcessWB() {
 
 void PipelineSimulator::RunSimulation() {
     while (retire_count < inst_count) {
+        // Release branch fetch stall at the start of the cycle AFTER the branch
+        // finished EX (the flag was set by ProcessEX in the previous cycle).
+        if(branch_finished_ex) {
+            branch_stall = false;
+            branch_finished_ex = false;
+        }
+
         ProcessWB();
         ProcessMEM();
         ProcessEX();
@@ -368,13 +382,21 @@ void PipelineSimulator::RunSimulation() {
 }
 
 void PipelineSimulator::OutputStatistics() const {
-    printf("Simulation clock: %ld cycles.\n", curr_cycle);
+    printf("Simulation clock: %llu cycles.\n", (unsigned long long)curr_cycle);
     double exec_time = (static_cast<double>(curr_cycle) / static_cast<double>(frequency)) * 1000.0;
-    printf("Total execution time: %.4f miliseconds.\n", exec_time);
+    printf("Total execution time: %.4f milliseconds.\n", exec_time);
     printf("Total num of instructions: %d\n", retire_count);
-    printf("Total num of integer instructions: %d\n", retire_int);
-    printf("Total num of floating point instructions: %d\n", retire_fp);
-    printf("Total num of branch instructions: %d\n", retire_branch);
-    printf("Total num of load instructions: %d\n", retire_load);
-    printf("Total num of store instructions: %d\n", retire_store);
+
+    double total = static_cast<double>(retire_count);
+    double pct_int    = (total > 0) ? (retire_int    / total * 100.0) : 0.0;
+    double pct_fp     = (total > 0) ? (retire_fp     / total * 100.0) : 0.0;
+    double pct_branch = (total > 0) ? (retire_branch / total * 100.0) : 0.0;
+    double pct_load   = (total > 0) ? (retire_load   / total * 100.0) : 0.0;
+    double pct_store  = (total > 0) ? (retire_store  / total * 100.0) : 0.0;
+
+    printf("Integer instructions:        %d (%.2f%%)\n", retire_int,    pct_int);
+    printf("Floating point instructions: %d (%.2f%%)\n", retire_fp,     pct_fp);
+    printf("Branch instructions:         %d (%.2f%%)\n", retire_branch, pct_branch);
+    printf("Load instructions:           %d (%.2f%%)\n", retire_load,   pct_load);
+    printf("Store instructions:          %d (%.2f%%)\n", retire_store,  pct_store);
 }
